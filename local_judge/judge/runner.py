@@ -188,11 +188,24 @@ class JudgeRunner:
         return out_text == ans_text
 
     def _invoke_checker(self, checker_path: str, args_template: Optional[str], in_path: str, ans_path: Optional[str], out_path: str, time_limit_s: float) -> Tuple[bool, str]:
-        args_template = args_template or "{in} {ans} {out}"
-        args_str = args_template.replace("{in}", shlex.quote(in_path)).replace("{out}", shlex.quote(out_path)).replace("{ans}", shlex.quote(ans_path or ""))
-        cmd = f"{shlex.quote(checker_path)} {args_str}".strip()
+        template = (args_template or "{in} {ans} {out}").strip()
+        # Replace placeholders with sentinels to allow robust shlex splitting even if user adds quotes
+        temp = (
+            template
+            .replace("{in}", "<<IN>>")
+            .replace("{ans}", "<<ANS>>")
+            .replace("{out}", "<<OUT>>")
+        )
         try:
-            proc = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(1.0, time_limit_s * 2))
+            tokens = shlex.split(temp, posix=(os.name != "nt"))
+        except Exception:
+            tokens = temp.split()
+        args_list = [
+            t.replace("<<IN>>", in_path).replace("<<ANS>>", ans_path or "").replace("<<OUT>>", out_path)
+            for t in tokens
+        ]
+        try:
+            proc = subprocess.run([checker_path] + args_list, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(1.0, time_limit_s * 2))
             ok = proc.returncode == 0
             details = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
             return ok, details
