@@ -10,18 +10,60 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Generator, List, Optional, Tuple
 
-def _read_rss_bytes(pid: int) -> int:
+def _rss_bytes(pid: int) -> int:
+    """Return RSS bytes using platform-specific methods."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            psapi = ctypes.windll.psapi
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_INFORMATION = 0x0400
+            PROCESS_VM_READ = 0x0010
+            handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if not handle:
+                return 0
+            try:
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                    return int(counters.WorkingSetSize)
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return 0
+        return 0
+    # Linux/Unix via /proc
     try:
         with open(f"/proc/{pid}/status", "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     parts = line.split()
                     if len(parts) >= 2 and parts[1].isdigit():
-                        # Value given in kB
                         return int(parts[1]) * 1024
     except Exception:
         pass
-    return 0
+    # Optional psutil fallback if available
+    try:
+        import psutil  # type: ignore
+        return int(psutil.Process(pid).memory_info().rss)
+    except Exception:
+        return 0
 
 
 @dataclass
@@ -167,13 +209,14 @@ class JudgeRunner:
         with open(in_path, "rb") as fin, open(out_path, "wb") as fout:
             try:
                 start = time.perf_counter()
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=fin,
-                    stdout=fout,
-                    stderr=subprocess.PIPE,
-                    preexec_fn=lambda: self._set_resource_limits(cfg.memory_limit_mb, cfg.time_limit_s),
-                )
+                kwargs = {
+                    "stdin": fin,
+                    "stdout": fout,
+                    "stderr": subprocess.PIPE,
+                }
+                if os.name != "nt":
+                    kwargs["preexec_fn"] = lambda: self._set_resource_limits(cfg.memory_limit_mb, cfg.time_limit_s)
+                proc = subprocess.Popen(cmd, **kwargs)
             except FileNotFoundError as e:
                 return JudgeResult(test_id=test_id, verdict="CE", time_ms=0, memory_mb=0.0, details=str(e))
             except Exception as e:
@@ -190,7 +233,7 @@ class JudgeRunner:
                     if time.perf_counter() > wall_deadline:
                         timed_out = True
                         break
-                    rss = _read_rss_bytes(proc.pid)
+                    rss = _rss_bytes(proc.pid)
                     if rss > peak_rss:
                         peak_rss = rss
                     if rss > cfg.memory_limit_mb * 1024 * 1024 and rss > 0:
