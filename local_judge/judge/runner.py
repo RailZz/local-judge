@@ -93,7 +93,7 @@ class JudgeRunner:
 
     def _discover_tests(self, directory: str, in_pat: str, ans_pat: str) -> List[Tuple[str, str, Optional[str]]]:
         # Convert {num} -> (\d+)
-        in_regex = re.escape(in_pat).replace(re.escape("{num}"), r"(\\d+)")
+        in_regex = re.escape(in_pat).replace(re.escape("{num}"), r"(\d+)")
         pattern = re.compile(f"^{in_regex}$")
         tests: List[Tuple[str, str, Optional[str]]] = []
         for name in sorted(os.listdir(directory)):
